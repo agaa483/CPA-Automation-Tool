@@ -364,3 +364,93 @@ def fetch_recent_transactions(
 
     results.sort(key=lambda r: (r["txn_date"] or "", r["qbo_txn_id"], r["line_num"]), reverse=True)
     return results
+
+
+def sync_categories(client_id: int) -> int:
+    """Pull all active accounts from QBO and upsert into the categories table.
+    Returns the number of accounts synced."""
+    qb_client = _build_qb_client(client_id)
+    accounts = _paginated(Account, "Active = true", qb_client)
+
+    with db.get_connection() as conn:
+        for a in accounts:
+            description_parts = []
+            if getattr(a, "AccountType", None):
+                description_parts.append(a.AccountType)
+            if getattr(a, "AccountSubType", None):
+                description_parts.append(a.AccountSubType)
+            if getattr(a, "Description", None):
+                description_parts.append(a.Description)
+            description = " | ".join(description_parts) if description_parts else None
+
+            # FullyQualifiedName preserves parent:child structure (e.g.
+            # "Job Expenses:Job Materials:Plants and Soil"). Fall back to Name.
+            name = getattr(a, "FullyQualifiedName", None) or a.Name
+
+            conn.execute(
+                """
+                INSERT INTO categories (client_id, qbo_account_id, name, description)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(client_id, qbo_account_id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description
+                """,
+                (client_id, a.Id, name, description),
+            )
+
+    return len(accounts)
+
+
+def update_category(
+    client_id: int, qbo_txn_id: str, new_category_name: str
+) -> bool:
+    """Recategorize a QBO Purchase. Fetches the current Purchase, swaps the
+    first expense line's AccountRef to the new account, and PUTs it back.
+    Returns True on success, raises on failure."""
+    qb_client = _build_qb_client(client_id)
+
+    # Resolve category name -> QBO account ID via local categories table.
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT qbo_account_id FROM categories WHERE client_id = ? AND name = ?",
+            (client_id, new_category_name),
+        ).fetchone()
+    if not row:
+        raise RuntimeError(
+            f"Category {new_category_name!r} not found in chart of accounts "
+            f"for client {client_id}. Run qbo-sync-categories."
+        )
+    new_account_id = row["qbo_account_id"]
+
+    # Fetch the current Purchase (need full object + current SyncToken to update).
+    try:
+        purchase = Purchase.get(qbo_txn_id, qb=qb_client)
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch Purchase {qbo_txn_id}: {e}") from e
+    if purchase is None:
+        raise RuntimeError(f"Purchase {qbo_txn_id} not found in QBO.")
+
+    # Swap the first expense line's account. (We currently audit one line at a
+    # time; multi-line targeting can be added when the CLI passes line_num.)
+    updated = False
+    for line in (purchase.Line or []):
+        detail = getattr(line, "AccountBasedExpenseLineDetail", None)
+        if detail is None or getattr(detail, "AccountRef", None) is None:
+            continue
+        detail.AccountRef.value = new_account_id
+        detail.AccountRef.name = new_category_name
+        updated = True
+        break
+
+    if not updated:
+        raise RuntimeError(
+            f"Purchase {qbo_txn_id} has no AccountBasedExpenseLineDetail line "
+            f"to update."
+        )
+
+    try:
+        purchase.save(qb=qb_client)
+    except Exception as e:
+        raise RuntimeError(f"QBO rejected update for Purchase {qbo_txn_id}: {e}") from e
+
+    return True
