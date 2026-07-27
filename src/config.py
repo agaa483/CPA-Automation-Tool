@@ -24,3 +24,8 @@ MS_TENANT_ID = _require("MS_TENANT_ID")
 MS_REDIRECT_URI = _require("MS_REDIRECT_URI")
 
 ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
+
+# Optional: scope all receipt searches to a single sender address.
+# When set, the auditor pre-fetches every email from this sender within a date
+# window of the transaction and hands the full batch to Claude in one call.
+RECEIPTS_FROM = (os.getenv("RECEIPTS_FROM") or "").strip() or None

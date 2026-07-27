@@ -430,22 +430,52 @@ def update_category(
     if purchase is None:
         raise RuntimeError(f"Purchase {qbo_txn_id} not found in QBO.")
 
-    # Swap the first expense line's account. (We currently audit one line at a
-    # time; multi-line targeting can be added when the CLI passes line_num.)
+    # Swap the first expense line's account. Handles both account-based and
+    # item-based lines. For item-based lines we rewrite the line as account-based
+    # (preserving Amount/Description) since the audit is reclassifying the
+    # category itself, not the underlying item.
+    from quickbooks.objects.detailline import (
+        AccountBasedExpenseLine,
+        AccountBasedExpenseLineDetail,
+    )
+    from quickbooks.objects.base import Ref
+
     updated = False
-    for line in (purchase.Line or []):
-        detail = getattr(line, "AccountBasedExpenseLineDetail", None)
-        if detail is None or getattr(detail, "AccountRef", None) is None:
-            continue
-        detail.AccountRef.value = new_account_id
-        detail.AccountRef.name = new_category_name
-        updated = True
-        break
+    for idx, line in enumerate(purchase.Line or []):
+        acct_detail = getattr(line, "AccountBasedExpenseLineDetail", None)
+        item_detail = getattr(line, "ItemBasedExpenseLineDetail", None)
+
+        if acct_detail is not None and getattr(acct_detail, "AccountRef", None) is not None:
+            acct_detail.AccountRef.value = new_account_id
+            acct_detail.AccountRef.name = new_category_name
+            updated = True
+            break
+
+        if item_detail is not None:
+            # Convert item-based -> account-based.
+            new_line = AccountBasedExpenseLine()
+            new_line.Amount = line.Amount
+            new_line.Description = line.Description
+            new_line.LineNum = line.LineNum
+            new_line.DetailType = "AccountBasedExpenseLineDetail"
+            detail = AccountBasedExpenseLineDetail()
+            account_ref = Ref()
+            account_ref.value = new_account_id
+            account_ref.name = new_category_name
+            account_ref.type = "Account"
+            detail.AccountRef = account_ref
+            # Preserve BillableStatus / CustomerRef if present on the old detail.
+            for attr in ("BillableStatus", "CustomerRef", "TaxCodeRef"):
+                if hasattr(item_detail, attr):
+                    setattr(detail, attr, getattr(item_detail, attr))
+            new_line.AccountBasedExpenseLineDetail = detail
+            purchase.Line[idx] = new_line
+            updated = True
+            break
 
     if not updated:
         raise RuntimeError(
-            f"Purchase {qbo_txn_id} has no AccountBasedExpenseLineDetail line "
-            f"to update."
+            f"Purchase {qbo_txn_id} has no expense line we can update."
         )
 
     try:

@@ -1,12 +1,20 @@
 from datetime import date as date_type, datetime
+from pathlib import Path
 
+import openpyxl
 import typer
+from openpyxl.styles import Font, PatternFill
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 from tabulate import tabulate
 
 from . import auditor, db, outlook, qbo
 from .config import DB_PATH
 
 app = typer.Typer()
+console = Console()
 
 
 @app.command("init-db")
@@ -227,16 +235,56 @@ def audit(
     typer.echo("(action_taken=no_change — QBO not modified.)")
 
 
+def _print_dry_run_panel(txn: dict, decision, original_category: str) -> None:
+    body = Text()
+    body.append("Vendor    ", style="dim")
+    body.append(f"{txn.get('vendor_raw') or '-'}\n")
+    body.append("Amount    ", style="dim")
+    body.append(f"${txn['amount']:,.2f}    ")
+    body.append("Date    ", style="dim")
+    body.append(f"{txn['txn_date']}\n\n")
+
+    body.append("Current   ", style="dim")
+    body.append(f"{original_category or '(none)'}\n", style="red")
+    body.append("Suggest   ", style="dim")
+    body.append(f"{decision.corrected_category}\n", style="green")
+
+    body.append("\n")
+    body.append("Reasoning\n", style="bold dim")
+    body.append(f"  {decision.reasoning}\n", style="italic")
+
+    if decision.supporting_email_ids:
+        body.append("\n")
+        body.append("Evidence  ", style="dim")
+        body.append(f"{len(decision.supporting_email_ids)} email(s) cited\n")
+
+    console.print(
+        Panel(
+            body,
+            title=f"[bold yellow]DRY-RUN[/bold yellow]  Txn {txn['qbo_txn_id']} (line {txn['line_num']})",
+            title_align="left",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+
+
 def _insert_new_transactions(client_id: int, txns: list[dict]) -> None:
-    """INSERT OR IGNORE each pulled txn so existing rows are left untouched."""
+    """Upsert each pulled txn. New rows start as 'pending'; existing rows
+    have their QBO-side fields refreshed but audit_status is preserved."""
     with db.get_connection() as conn:
         for t in txns:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO transactions (
+                INSERT INTO transactions (
                     client_id, qbo_txn_id, txn_date, amount, vendor_raw,
                     current_qbo_category, audit_status
                 ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                ON CONFLICT(client_id, qbo_txn_id) DO UPDATE SET
+                    txn_date = excluded.txn_date,
+                    amount = excluded.amount,
+                    vendor_raw = excluded.vendor_raw,
+                    current_qbo_category = excluded.current_qbo_category
                 """,
                 (
                     client_id,
@@ -303,7 +351,8 @@ def run(
     for client_row in rows:
         cid = client_row["id"]
         firm = client_row["firm_name"]
-        typer.echo(f"\n=== Client {cid}: {firm} ===")
+        console.print()
+        console.rule(f"[bold cyan]Client {cid}: {firm}[/bold cyan]")
 
         # Refresh tokens up-front (also surfaces auth failures before doing work).
         try:
@@ -385,6 +434,9 @@ def run(
                     raw_response=raw,
                     action_taken="no_change",
                 )
+                typer.echo(
+                    f"  [{qbo_id}] OK: '{original_category}' — {decision.reasoning}"
+                )
                 grand_no_change += 1
                 continue
 
@@ -399,10 +451,7 @@ def run(
                     raw_response=raw,
                     action_taken="dry_run",
                 )
-                typer.echo(
-                    f"  [{qbo_id}] DRY-RUN: '{original_category}' -> "
-                    f"'{decision.corrected_category}' ({decision.reasoning})"
-                )
+                _print_dry_run_panel(txn, decision, original_category)
                 grand_dry_run += 1
                 continue
 
@@ -439,15 +488,231 @@ def run(
             grand_corrected += 1
 
     # Summary
-    typer.echo("\n=== Summary ===")
-    typer.echo(f"Audited:   {grand_audited}")
-    typer.echo(f"No change: {grand_no_change}")
+    console.print()
+    summary = Table(show_header=False, box=None, padding=(0, 2))
+    summary.add_column(style="dim")
+    summary.add_column(justify="right", style="bold")
+    summary.add_row("Audited", str(grand_audited))
+    summary.add_row("No change", f"[green]{grand_no_change}[/green]")
     if dry_run:
-        typer.echo(f"Dry-run:   {grand_dry_run}")
+        summary.add_row("Flagged (dry-run)", f"[yellow]{grand_dry_run}[/yellow]")
     else:
-        typer.echo(f"Corrected: {grand_corrected}")
-    typer.echo(f"Skipped:   {grand_skipped}")
-    typer.echo(f"Errors:    {grand_errors}")
+        summary.add_row("Corrected", f"[green]{grand_corrected}[/green]")
+    summary.add_row("Skipped", str(grand_skipped))
+    summary.add_row("Errors", f"[red]{grand_errors}[/red]" if grand_errors else "0")
+    console.print(Panel(summary, title="[bold]Summary[/bold]", title_align="left", border_style="cyan"))
+
+
+EXCEL_UNCATEGORIZED_PREFIX = "Uncategorized"
+
+
+@app.command("audit-excel")
+def audit_excel(
+    client_id: int = typer.Option(..., "--client-id"),
+    file: str = typer.Option(..., "--file", help="Path to the bank Excel export."),
+    output: str = typer.Option(
+        None, "--output", help="Output path. Defaults to <file>_suggestions.xlsx."
+    ),
+    audit_existing: bool = typer.Option(
+        False,
+        "--audit-existing",
+        help="Audit rows that already have a category (check correctness). "
+        "Default is to only suggest for Uncategorized rows.",
+    ),
+) -> None:
+    in_path = Path(file)
+    if not in_path.exists():
+        typer.echo(f"File not found: {in_path}", err=True)
+        raise typer.Exit(code=1)
+
+    out_path = Path(output) if output else in_path.with_name(in_path.stem + "_suggestions.xlsx")
+
+    wb = openpyxl.load_workbook(in_path)
+    ws = wb.active
+
+    # Auto-detect the header row: scan first 10 rows for one that contains "Date"
+    # somewhere. Bank exports often have a title row (or two) above the headers.
+    header_row_idx = None
+    for r in range(1, min(11, ws.max_row + 1)):
+        row_values = [
+            (str(c.value).strip().lower() if c.value else "") for c in ws[r]
+        ]
+        if "date" in row_values:
+            header_row_idx = r
+            break
+    if header_row_idx is None:
+        typer.echo(
+            "Couldn't find a header row containing 'Date' in the first 10 rows.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    header_row = [c.value for c in ws[header_row_idx]]
+    header_lookup = {
+        (str(h).strip().lower() if h else ""): i + 1 for i, h in enumerate(header_row)
+    }
+
+    def find_col(*aliases: str, required: bool = True) -> int | None:
+        for a in aliases:
+            idx = header_lookup.get(a.strip().lower())
+            if idx is not None:
+                return idx
+        if required:
+            typer.echo(
+                f"Missing expected column. Looked for any of: {aliases}. "
+                f"Found headers: {[h for h in header_row if h]}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        return None
+
+    col = {
+        "date": find_col("Date"),
+        "desc": find_col("Bank description", "Description", "DESCRIPTION", "Memo"),
+        "spent": find_col("Spent", "SPENT", "Amount Out", "Debit"),
+        "received": find_col("Received", "RECEIVED", "Amount In", "Credit"),
+        "from_to": find_col("From/To", "Payee", "Vendor", required=False),
+        "match": find_col("Match/Categorize", "Categorize or match", "Category"),
+    }
+
+    # Append three output columns.
+    payee_col = ws.max_column + 1
+    sugg_col = ws.max_column + 2
+    reason_col = ws.max_column + 3
+    ws.cell(row=header_row_idx, column=payee_col, value="Suggested Payee").font = Font(bold=True)
+    ws.cell(row=header_row_idx, column=sugg_col, value="Suggested Category").font = Font(bold=True)
+    ws.cell(row=header_row_idx, column=reason_col, value="Reasoning").font = Font(bold=True)
+
+    yellow = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    green = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+
+    total = 0
+    suggested = 0
+    skipped_already = 0
+    skipped_empty = 0
+    errors = 0
+
+    for row_idx in range(header_row_idx + 1, ws.max_row + 1):
+        match_val = ws.cell(row=row_idx, column=col["match"]).value
+        match_str = str(match_val).strip() if match_val else ""
+        is_uncategorized = (not match_str) or match_str.lower().startswith(
+            EXCEL_UNCATEGORIZED_PREFIX.lower()
+        )
+
+        # Skip logic depends on mode:
+        # - default: only process Uncategorized rows
+        # - --audit-existing: process everything that has a category set
+        if audit_existing:
+            if is_uncategorized:
+                skipped_already += 1  # nothing to audit against
+                continue
+        else:
+            if not is_uncategorized:
+                skipped_already += 1
+                continue
+
+        date_val = ws.cell(row=row_idx, column=col["date"]).value
+        spent = ws.cell(row=row_idx, column=col["spent"]).value
+        received = ws.cell(row=row_idx, column=col["received"]).value
+        desc = ws.cell(row=row_idx, column=col["desc"]).value
+        from_to = ws.cell(row=row_idx, column=col["from_to"]).value if col["from_to"] else None
+
+        amount = spent if spent is not None else received
+        direction = "out" if spent is not None else "in"
+
+        if amount is None or date_val is None:
+            skipped_empty += 1
+            continue
+
+        total += 1
+
+        if audit_existing:
+            txn = {
+                "qbo_txn_id": f"row-{row_idx}",
+                "txn_type": "Bank",
+                "line_num": 1,
+                "txn_date": date_val.date() if isinstance(date_val, datetime) else date_val,
+                "amount": float(amount),
+                "vendor_raw": desc or from_to,
+                "current_qbo_category": match_str,
+            }
+            try:
+                decision = auditor.audit_transaction(client_id, txn)
+            except RuntimeError as e:
+                ws.cell(row=row_idx, column=payee_col, value=None)
+                ws.cell(row=row_idx, column=sugg_col, value="(error)")
+                ws.cell(row=row_idx, column=reason_col, value=str(e))
+                errors += 1
+                typer.echo(f"  Row {row_idx}: error - {e}", err=True)
+                continue
+
+            if decision.is_correct:
+                ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=sugg_col, value="(looks correct)")
+                ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
+                ws.cell(row=row_idx, column=sugg_col).fill = green
+                typer.echo(f"  Row {row_idx}: {desc or '(no vendor)'} ${amount} OK ({match_str})")
+                typer.echo(f"    reasoning: {decision.reasoning}")
+            else:
+                ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=sugg_col, value=decision.corrected_category)
+                ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
+                ws.cell(row=row_idx, column=sugg_col).fill = yellow
+                suggested += 1
+                typer.echo(
+                    f"  Row {row_idx}: {desc or '(no vendor)'} ${amount} "
+                    f"FLAG '{match_str}' -> '{decision.corrected_category}'"
+                )
+                typer.echo(f"    reasoning: {decision.reasoning}")
+        else:
+            txn = {
+                "txn_date": date_val.date() if isinstance(date_val, datetime) else date_val,
+                "amount": float(amount),
+                "vendor_raw": desc,
+                "counterparty": from_to,
+                "direction": direction,
+            }
+            try:
+                decision = auditor.suggest_category(client_id, txn)
+            except RuntimeError as e:
+                ws.cell(row=row_idx, column=payee_col, value=None)
+                ws.cell(row=row_idx, column=sugg_col, value="(error)")
+                ws.cell(row=row_idx, column=reason_col, value=str(e))
+                errors += 1
+                typer.echo(f"  Row {row_idx}: error - {e}", err=True)
+                continue
+
+            if decision.is_correct:
+                ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=sugg_col, value="(no suggestion)")
+                ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
+                ws.cell(row=row_idx, column=sugg_col).fill = yellow
+            else:
+                ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=sugg_col, value=decision.corrected_category)
+                ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
+                ws.cell(row=row_idx, column=sugg_col).fill = green
+                suggested += 1
+
+            typer.echo(
+                f"  Row {row_idx}: {desc or '(no vendor)'} ${amount} "
+                f"-> {decision.corrected_category or '(no suggestion)'}"
+            )
+
+    wb.save(out_path)
+
+    console.print()
+    summary = Table(show_header=False, box=None, padding=(0, 2))
+    summary.add_column(style="dim")
+    summary.add_column(justify="right", style="bold")
+    summary.add_row("Rows processed", str(total))
+    summary.add_row("Suggested", f"[green]{suggested}[/green]")
+    summary.add_row("No suggestion", f"[yellow]{total - suggested - errors}[/yellow]")
+    summary.add_row("Skipped (already categorized)", str(skipped_already))
+    summary.add_row("Skipped (empty row)", str(skipped_empty))
+    summary.add_row("Errors", f"[red]{errors}[/red]" if errors else "0")
+    console.print(Panel(summary, title="[bold]Excel Audit Summary[/bold]", title_align="left", border_style="cyan"))
+    console.print(f"\nWrote: [bold]{out_path}[/bold]")
 
 
 if __name__ == "__main__":
