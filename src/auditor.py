@@ -89,12 +89,24 @@ AUDIT_TOOL = {
             "suggested_payee": {
                 "type": ["string", "null"],
                 "description": (
-                    "Cleaned-up vendor/payee name extracted from the transaction "
-                    "description or email evidence. Examples: 'Zoom' (not "
+                    "For OUTGOING transactions (expenses): cleaned-up vendor/payee "
+                    "name extracted from the transaction description or email "
+                    "evidence. Examples: 'Zoom' (not "
                     "'ATM RCR Payment ZOOM.COM 888-799 ZOOM.US CA #9204'), "
                     "'Kruti Desai' for check payments identified via email, "
-                    "'Constant Contact' for CCI*CONSTANT-CON. Null if no "
-                    "identifiable payee (e.g. check with no email evidence)."
+                    "'Constant Contact' for CCI*CONSTANT-CON. Null for incoming "
+                    "transactions or when no identifiable payee."
+                ),
+            },
+            "suggested_payor": {
+                "type": ["string", "null"],
+                "description": (
+                    "For INCOMING transactions (deposits, credits, receipts): "
+                    "cleaned-up name of the person or organization that sent "
+                    "the money. Examples: 'Ketan Patel' for an incoming Zelle, "
+                    "'United Arts Council' for a grant deposit, 'Zeffy' for a "
+                    "platform deposit. Null for outgoing transactions or when "
+                    "no identifiable payor."
                 ),
             },
         },
@@ -131,11 +143,15 @@ new results change your verdict.
 When you cite emails as evidence, include their message IDs in supporting_email_ids so a \
 human can audit your reasoning later.
 
-Also fill in suggested_payee with a clean vendor name whenever you can identify one — \
-either extracted from the bank description (strip bank codes, phone numbers, ATM prefixes) \
-or resolved via email evidence (e.g. "Check 1187" + email listing "Ashwani Arora CPA" \
-= payee is "Ashwani Arora CPA"). Leave suggested_payee null only when there's no \
-identifiable payee.
+Also fill in either suggested_payee OR suggested_payor (never both) based on transaction \
+direction:
+- OUTGOING transaction (expense / money leaving): use suggested_payee for the vendor being paid
+- INCOMING transaction (deposit / money coming in): use suggested_payor for the source of funds
+
+Clean up the name — strip bank codes, phone numbers, ATM prefixes, extra whitespace. \
+Resolve via email evidence when the description is opaque (e.g. "Check 1187" + email \
+listing "Ashwani Arora CPA" → payee is "Ashwani Arora CPA"). Set to null only when there's \
+no identifiable name.
 
 If you mark is_correct = false, corrected_category MUST be the exact name of an account \
 from the chart of accounts provided in the user message. Do not invent account names. \

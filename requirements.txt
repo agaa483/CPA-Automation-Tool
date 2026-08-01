@@ -24,7 +24,7 @@ pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 Pygments==2.20.0
-PyJWT==2.12.1
+PyJWT[crypto]==2.12.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-quickbooks==0.9.12

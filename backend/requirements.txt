@@ -1,0 +1,7 @@
+# FastAPI backend dependencies (in addition to the top-level requirements.txt
+# which covers the audit logic, QBO, Outlook, Anthropic, etc.)
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+email-validator==2.2.0
+httpx==0.28.1

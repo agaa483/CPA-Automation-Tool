@@ -1,0 +1,14 @@
+# Litestream config: continuously back up SQLite to S3-compatible storage.
+# Env vars needed at runtime:
+#   LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY
+#   LITESTREAM_REPLICA_URL   e.g. s3://my-bucket/qb-auditor
+# If LITESTREAM_ACCESS_KEY_ID is unset, entrypoint.sh skips litestream entirely.
+
+dbs:
+  - path: /data/app.db
+    replicas:
+      - url: ${LITESTREAM_REPLICA_URL}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        retention: 168h        # keep 7 days
+        snapshot-interval: 24h

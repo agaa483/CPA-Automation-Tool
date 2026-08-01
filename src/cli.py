@@ -575,11 +575,13 @@ def audit_excel(
         "match": find_col("Match/Categorize", "Categorize or match", "Category"),
     }
 
-    # Append three output columns.
+    # Append four output columns.
     payee_col = ws.max_column + 1
-    sugg_col = ws.max_column + 2
-    reason_col = ws.max_column + 3
+    payor_col = ws.max_column + 2
+    sugg_col = ws.max_column + 3
+    reason_col = ws.max_column + 4
     ws.cell(row=header_row_idx, column=payee_col, value="Suggested Payee").font = Font(bold=True)
+    ws.cell(row=header_row_idx, column=payor_col, value="Suggested Payor").font = Font(bold=True)
     ws.cell(row=header_row_idx, column=sugg_col, value="Suggested Category").font = Font(bold=True)
     ws.cell(row=header_row_idx, column=reason_col, value="Reasoning").font = Font(bold=True)
 
@@ -640,6 +642,7 @@ def audit_excel(
                 decision = auditor.audit_transaction(client_id, txn)
             except RuntimeError as e:
                 ws.cell(row=row_idx, column=payee_col, value=None)
+                ws.cell(row=row_idx, column=payor_col, value=None)
                 ws.cell(row=row_idx, column=sugg_col, value="(error)")
                 ws.cell(row=row_idx, column=reason_col, value=str(e))
                 errors += 1
@@ -648,6 +651,7 @@ def audit_excel(
 
             if decision.is_correct:
                 ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=payor_col, value=decision.suggested_payor)
                 ws.cell(row=row_idx, column=sugg_col, value="(looks correct)")
                 ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
                 ws.cell(row=row_idx, column=sugg_col).fill = green
@@ -655,6 +659,7 @@ def audit_excel(
                 typer.echo(f"    reasoning: {decision.reasoning}")
             else:
                 ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=payor_col, value=decision.suggested_payor)
                 ws.cell(row=row_idx, column=sugg_col, value=decision.corrected_category)
                 ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
                 ws.cell(row=row_idx, column=sugg_col).fill = yellow
@@ -676,6 +681,7 @@ def audit_excel(
                 decision = auditor.suggest_category(client_id, txn)
             except RuntimeError as e:
                 ws.cell(row=row_idx, column=payee_col, value=None)
+                ws.cell(row=row_idx, column=payor_col, value=None)
                 ws.cell(row=row_idx, column=sugg_col, value="(error)")
                 ws.cell(row=row_idx, column=reason_col, value=str(e))
                 errors += 1
@@ -684,11 +690,13 @@ def audit_excel(
 
             if decision.is_correct:
                 ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=payor_col, value=decision.suggested_payor)
                 ws.cell(row=row_idx, column=sugg_col, value="(no suggestion)")
                 ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
                 ws.cell(row=row_idx, column=sugg_col).fill = yellow
             else:
                 ws.cell(row=row_idx, column=payee_col, value=decision.suggested_payee)
+                ws.cell(row=row_idx, column=payor_col, value=decision.suggested_payor)
                 ws.cell(row=row_idx, column=sugg_col, value=decision.corrected_category)
                 ws.cell(row=row_idx, column=reason_col, value=decision.reasoning)
                 ws.cell(row=row_idx, column=sugg_col).fill = green

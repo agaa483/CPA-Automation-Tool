@@ -7,6 +7,7 @@ class AuditDecision(BaseModel):
     reasoning: str = Field(..., min_length=1)
     supporting_email_ids: list[str] = []
     suggested_payee: str | None = None
+    suggested_payor: str | None = None
 
     @model_validator(mode="after")
     def _require_corrected_when_incorrect(self) -> "AuditDecision":
