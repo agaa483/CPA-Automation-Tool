@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,6 +31,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# CORS — allow local dev + any configured frontend URL. Also allow any *.vercel.app
+# preview deploy so Vercel PR previews work.
+_frontend_url = os.getenv("FRONTEND_URL", "").rstrip("/")
+_allowed_origins = ["http://localhost:3000"]
+if _frontend_url:
+    _allowed_origins.append(_frontend_url)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(clients.router)
 app.include_router(categories.router)
 app.include_router(receipt_senders.router)
@@ -36,16 +54,6 @@ app.include_router(audits.router)
 app.include_router(excel.router)
 app.include_router(oauth_qbo.router)
 app.include_router(oauth_outlook.router)
-
-# CORS — allow the Next.js frontend to call us. In production, lock this to
-# your Vercel domain via an env var.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js dev server
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/health")
