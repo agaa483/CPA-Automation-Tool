@@ -6,10 +6,13 @@ from backend.auth import current_user_id
 
 
 def _ensure_firms_schema() -> None:
-    """Idempotent schema migration: adds firms table + firm_id column on clients.
-    Runs on-demand rather than requiring a separate migration step for v1.
-    Backfills existing clients into the first firm that logs in (dad's setup).
+    """Idempotent schema bootstrap.
+    Ensures core tables exist (fresh deploys have an empty volume) and adds
+    the firms table + firm_id column on clients if not already present.
     """
+    # Base schema (clients, categories, transactions, audit_log) — safe on repeat.
+    db.init_db()
+
     with db.get_connection() as conn:
         conn.execute(
             """
@@ -21,7 +24,6 @@ def _ensure_firms_schema() -> None:
             )
             """
         )
-        # Add firm_id to clients if not present.
         cols = conn.execute("PRAGMA table_info(clients)").fetchall()
         has_firm_id = any(c["name"] == "firm_id" for c in cols)
         if not has_firm_id:
