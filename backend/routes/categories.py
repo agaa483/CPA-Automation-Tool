@@ -37,6 +37,8 @@ def sync_categories(client_id: int):
     """Pull chart of accounts from QBO into local DB. Requires QBO connected."""
     try:
         count = qbo.sync_categories(client_id)
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Catch broadly (QuickbooksException, RuntimeError, network, etc.) so
+        # the frontend sees a real error message instead of a generic fetch failure.
+        raise HTTPException(status_code=400, detail=f"Sync failed: {e}")
     return SyncResult(synced=count)
