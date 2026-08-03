@@ -94,12 +94,12 @@ def run_audit(client_id: int):
     try:
         qbo.refresh_token_if_needed(client_id)
         outlook.refresh_token_if_needed(client_id)
-    except RuntimeError as e:
+    except Exception as e:
         raise HTTPException(status_code=401, detail=f"Token refresh failed: {e}")
 
     try:
         pulled = qbo.fetch_recent_transactions(client_id)
-    except RuntimeError as e:
+    except Exception as e:
         raise HTTPException(status_code=502, detail=f"QBO fetch failed: {e}")
 
     _upsert_pulled(client_id, pulled)
@@ -129,8 +129,10 @@ def run_audit(client_id: int):
         audited += 1
         try:
             decision = auditor.audit_transaction(client_id, txn)
-        except RuntimeError as e:
+        except Exception as e:
             errors += 1
+            # Log to stdout so `fly logs` shows per-txn failures during debugging.
+            print(f"audit failed for txn {qbo_id}: {type(e).__name__}: {e}")
             continue
 
         original_category = txn["current_qbo_category"] or ""
