@@ -25,7 +25,7 @@ MS_CLIENT_SECRET = _require("MS_CLIENT_SECRET")
 MS_TENANT_ID = _require("MS_TENANT_ID")
 MS_REDIRECT_URI = os.getenv("MS_REDIRECT_URI", "")
 
-ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
+ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY").strip()
 
 # Where the backend is reachable (used to construct OAuth callback URLs).
 # Local dev: http://localhost:8001. Prod: https://api.your-domain.com.
