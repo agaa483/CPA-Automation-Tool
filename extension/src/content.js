@@ -23,8 +23,45 @@ const SELECTORS = {
 const BADGE_CLASS = "qba-suggestion-badge";
 const DEBOUNCE_MS = 800;
 
-let seenRows = new WeakSet();
+// Cache: content-key → suggestion. In-memory + persisted to chrome.storage.local
+// so it survives page refresh.
+const suggestionCache = new Map();
+const inFlight = new Set();
 let debounceTimer = null;
+const CACHE_KEY = "qba_suggestion_cache_v1";
+
+function contentKey(rowData) {
+  return [
+    rowData.date || "",
+    rowData.amount.toFixed(2),
+    (rowData.vendor || "").trim(),
+    (rowData.description || "").trim(),
+  ].join("|");
+}
+
+async function loadCacheFromStorage() {
+  try {
+    const stored = await chrome.storage.local.get(CACHE_KEY);
+    const obj = stored[CACHE_KEY] || {};
+    Object.entries(obj).forEach(([k, v]) => suggestionCache.set(k, v));
+    log(`Loaded ${suggestionCache.size} cached suggestions from storage`);
+  } catch (e) {
+    log("Cache load failed:", e);
+  }
+}
+
+let saveTimer = null;
+function schedulePersist() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    const obj = Object.fromEntries(suggestionCache);
+    try {
+      await chrome.storage.local.set({ [CACHE_KEY]: obj });
+    } catch (e) {
+      log("Cache persist failed:", e);
+    }
+  }, 1000);
+}
 
 function log(...args) {
   console.log("[QB Auditor]", ...args);
@@ -35,9 +72,14 @@ function isForReviewPage() {
 }
 
 function extractRowData(rowEl) {
-  const domId = rowEl.getAttribute("data-testid") ||
-                rowEl.id ||
-                "row-" + Math.random().toString(36).slice(2, 10);
+  // Stable ID per row — cache on the element so repeated calls return the same value.
+  let domId = rowEl.dataset.qbaId;
+  if (!domId) {
+    domId = rowEl.getAttribute("data-testid") ||
+            rowEl.id ||
+            "qba-row-" + Math.random().toString(36).slice(2, 10);
+    rowEl.dataset.qbaId = domId;
+  }
 
   const readText = (selectorList) => {
     for (const sel of selectorList.split(",")) {
@@ -112,38 +154,80 @@ function injectBadge(rowEl, suggestion) {
   }
 }
 
+const BATCH_SIZE = 5;
+
+function rowNeedsBadge(rowEl) {
+  return !rowEl.querySelector("." + BADGE_CLASS);
+}
+
 async function processRows() {
   if (!isForReviewPage()) return;
 
-  const rows = document.querySelectorAll(SELECTORS.forReviewRow);
-  const newRows = Array.from(rows).filter((r) => !seenRows.has(r));
-  if (newRows.length === 0) return;
+  const rows = Array.from(document.querySelectorAll(SELECTORS.forReviewRow));
+  if (rows.length === 0) return;
 
-  log(`Processing ${newRows.length} new rows`);
+  // 1) For rows that already have a cached suggestion but no badge → inject.
+  let restored = 0;
+  const toFetch = [];
+  for (const row of rows) {
+    if (!rowNeedsBadge(row)) continue;
+    const rowData = extractRowData(row);
+    const key = contentKey(rowData);
+    const cached = suggestionCache.get(key);
+    if (cached) {
+      injectBadge(row, cached);
+      restored++;
+    } else if (!inFlight.has(key)) {
+      inFlight.add(key);
+      toFetch.push({ row, rowData, key });
+    }
+  }
+  if (restored > 0) log(`Restored ${restored} cached badges`);
+  if (toFetch.length === 0) return;
 
-  const txns = newRows.map(extractRowData);
-  newRows.forEach((r) => seenRows.add(r));
+  log(`Fetching suggestions for ${toFetch.length} new rows (batches of ${BATCH_SIZE})`);
 
-  chrome.runtime.sendMessage(
-    { action: "categorize", txns },
-    (response) => {
+  for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
+    const batch = toFetch.slice(i, i + BATCH_SIZE);
+    const txns = batch.map((b) => b.rowData);
+    log(`  Batch ${i / BATCH_SIZE + 1}: sending ${txns.length} txns…`);
+
+    chrome.runtime.sendMessage({ action: "categorize", txns }, (response) => {
       if (!response) {
-        log("No response from background worker (extension might need reload)");
+        log("  No response from background worker");
+        batch.forEach((b) => inFlight.delete(b.key));
         return;
       }
       if (!response.ok) {
-        log("Categorize error:", response.error);
+        log("  Categorize error:", response.error);
+        batch.forEach((b) => inFlight.delete(b.key));
         return;
       }
       const suggestions = response.data.suggestions || [];
       const byId = new Map(suggestions.map((s) => [s.dom_id, s]));
-      newRows.forEach((row) => {
-        const rowData = extractRowData(row);
-        const sug = byId.get(rowData.dom_id);
-        if (sug) injectBadge(row, sug);
+      let injected = 0;
+      // Cache everything first so navigation-back restores from cache.
+      batch.forEach((b) => {
+        const sug = byId.get(b.rowData.dom_id);
+        if (sug) suggestionCache.set(b.key, sug);
+        inFlight.delete(b.key);
       });
-    }
-  );
+      schedulePersist();
+      // Then find matching rows in the CURRENT DOM (may have been re-rendered)
+      // and inject. This handles the case where pagination happened during fetch.
+      const currentRows = document.querySelectorAll(SELECTORS.forReviewRow);
+      currentRows.forEach((row) => {
+        if (!rowNeedsBadge(row)) return;
+        const rowData = extractRowData(row);
+        const cached = suggestionCache.get(contentKey(rowData));
+        if (cached) {
+          injectBadge(row, cached);
+          injected++;
+        }
+      });
+      log(`  Batch done: ${injected} badges injected (in current DOM)`);
+    });
+  }
 }
 
 function scheduleProcess() {
@@ -155,7 +239,7 @@ function scheduleProcess() {
 const observer = new MutationObserver(() => scheduleProcess());
 observer.observe(document.body, { childList: true, subtree: true });
 
-// Initial run
-scheduleProcess();
+// Load persisted cache first, then start processing.
+loadCacheFromStorage().then(() => scheduleProcess());
 
 log("QB Auditor extension loaded");

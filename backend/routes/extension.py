@@ -37,6 +37,34 @@ def _ensure_tokens_table() -> None:
             )
             """
         )
+        # Cache table so repeated categorize calls for the same (client, txn)
+        # combo don't re-run Claude. Extension refreshes → free cache hits.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extension_suggestion_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL REFERENCES clients(id),
+                content_key TEXT NOT NULL,
+                suggested_category TEXT,
+                suggested_payee TEXT,
+                suggested_payor TEXT,
+                reasoning TEXT,
+                confidence TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(client_id, content_key)
+            )
+            """
+        )
+
+
+def _content_key(t) -> str:
+    """Stable key across pagination / refreshes for a given txn."""
+    return "|".join([
+        (t.date or "")[:10],
+        f"{abs(t.amount):.2f}",
+        (t.vendor or "").strip().lower(),
+        (t.description or "").strip().lower(),
+    ])
 
 
 # ─── Models ────────────────────────────────────────────────────────────────
@@ -167,8 +195,31 @@ def categorize(
     suggestions: list[ExtSuggestion] = []
 
     for t in payload.txns:
-        # Reuse the suggest_category pipeline (best fit for "give me a category
-        # for this row" — same LLM + email pipeline as the Excel workflow).
+        ckey = _content_key(t)
+
+        # 1) Cache hit — return persisted suggestion without hitting Claude.
+        with db.get_connection() as conn:
+            cached = conn.execute(
+                """
+                SELECT suggested_category, suggested_payee, suggested_payor,
+                       reasoning, confidence
+                FROM extension_suggestion_cache
+                WHERE client_id = ? AND content_key = ?
+                """,
+                (payload.client_id, ckey),
+            ).fetchone()
+        if cached:
+            suggestions.append(ExtSuggestion(
+                dom_id=t.dom_id,
+                suggested_category=cached["suggested_category"],
+                suggested_payee=cached["suggested_payee"],
+                suggested_payor=cached["suggested_payor"],
+                reasoning=cached["reasoning"] or "",
+                confidence=cached["confidence"],
+            ))
+            continue
+
+        # 2) Cache miss — run Claude, then persist.
         txn_dict = {
             "txn_date": _parse_date(t.date),
             "amount": abs(t.amount),
@@ -188,29 +239,77 @@ def categorize(
             ))
             continue
 
-        # is_correct=True from suggest_category means "I don't know" (fallback).
-        # is_correct=False + corrected_category means "here's my suggestion".
         if decision.is_correct:
-            suggestions.append(ExtSuggestion(
-                dom_id=t.dom_id,
-                suggested_category=None,
-                suggested_payee=decision.suggested_payee,
-                suggested_payor=decision.suggested_payor,
-                reasoning=decision.reasoning,
-                confidence="low",
-            ))
+            sug_cat = None
+            confidence = "low"
         else:
+            sug_cat = decision.corrected_category
             confidence = "high" if decision.supporting_email_ids else "medium"
-            suggestions.append(ExtSuggestion(
-                dom_id=t.dom_id,
-                suggested_category=decision.corrected_category,
-                suggested_payee=decision.suggested_payee,
-                suggested_payor=decision.suggested_payor,
-                reasoning=decision.reasoning,
-                confidence=confidence,
-            ))
+
+        sug = ExtSuggestion(
+            dom_id=t.dom_id,
+            suggested_category=sug_cat,
+            suggested_payee=decision.suggested_payee,
+            suggested_payor=decision.suggested_payor,
+            reasoning=decision.reasoning,
+            confidence=confidence,
+        )
+        suggestions.append(sug)
+
+        # Only cache successful decisions (not errors or empty responses).
+        # Errored/empty responses shouldn't stick — user might rerun later.
+        if sug_cat or decision.reasoning:
+            with db.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO extension_suggestion_cache
+                    (client_id, content_key, suggested_category, suggested_payee,
+                     suggested_payor, reasoning, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload.client_id, ckey, sug_cat,
+                        decision.suggested_payee, decision.suggested_payor,
+                        decision.reasoning, confidence,
+                    ),
+                )
 
     return CategorizeResponse(suggestions=suggestions)
+
+
+class ClearCacheResponse(BaseModel):
+    deleted: int
+
+
+@router.post("/clear-cache", response_model=ClearCacheResponse)
+def clear_cache(
+    client_id: int | None = None,
+    firm_id: int = Depends(_resolve_ext_token),
+):
+    """Invalidate cached suggestions. Optionally scope to one client."""
+    with db.get_connection() as conn:
+        if client_id is not None:
+            # Verify ownership first.
+            row = conn.execute(
+                "SELECT id FROM clients WHERE id = ? AND firm_id = ?",
+                (client_id, firm_id),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Client not found")
+            cur = conn.execute(
+                "DELETE FROM extension_suggestion_cache WHERE client_id = ?",
+                (client_id,),
+            )
+        else:
+            # Wipe all cached suggestions for this firm's clients.
+            cur = conn.execute(
+                """
+                DELETE FROM extension_suggestion_cache
+                WHERE client_id IN (SELECT id FROM clients WHERE firm_id = ?)
+                """,
+                (firm_id,),
+            )
+        return ClearCacheResponse(deleted=cur.rowcount)
 
 
 def _parse_date(s: Optional[str]) -> date:
