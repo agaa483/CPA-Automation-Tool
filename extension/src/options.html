@@ -7,10 +7,11 @@
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 620px; margin: 40px auto; padding: 0 20px; color: #111; line-height: 1.5; }
     h1 { font-size: 24px; }
     label { display: block; margin-top: 20px; font-weight: 600; font-size: 14px; }
-    input { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 4px; margin-top: 6px; box-sizing: border-box; }
+    input, select { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 4px; margin-top: 6px; box-sizing: border-box; background: white; }
     .hint { color: #6b7280; font-size: 13px; margin-top: 4px; }
     button { margin-top: 24px; background: #111; color: #fff; border: none; padding: 10px 18px; border-radius: 4px; font-size: 14px; cursor: pointer; }
-    button:hover { background: #333; }
+    button.secondary { background: white; color: #111; border: 1px solid #d1d5db; margin-left: 10px; }
+    button:hover { opacity: 0.9; }
     .status { margin-top: 16px; padding: 10px; border-radius: 4px; font-size: 14px; }
     .status.ok { background: #d1fae5; color: #065f46; }
     .status.bad { background: #fee2e2; color: #991b1b; }
@@ -19,7 +20,7 @@
 </head>
 <body>
   <h1>QB Auditor — Settings</h1>
-  <p>Paste your extension token from the web app dashboard, then choose which client this session should categorize for.</p>
+  <p>Paste your extension token from the web app dashboard, then pick which client to categorize for.</p>
 
   <label>Backend URL</label>
   <input id="backendUrl" placeholder="https://qb-auditor-backend.fly.dev" />
@@ -28,10 +29,12 @@
   <label>Extension token</label>
   <input id="token" type="password" placeholder="qbaext_..." />
   <div class="hint">Get one from <code>Dashboard → Settings → Chrome extension</code> on the web app.</div>
+  <button id="loadClients" class="secondary" style="margin-top: 10px;">Load clients</button>
 
-  <label>Client ID</label>
-  <input id="clientId" type="number" placeholder="1" />
-  <div class="hint">The client whose books this extension session applies to. Find it in the web app URL.</div>
+  <label>Client</label>
+  <select id="clientSelect" disabled>
+    <option value="">— Enter token and click Load clients —</option>
+  </select>
 
   <button id="save">Save</button>
 

@@ -9,14 +9,15 @@
 // right-click → Copy → Copy selector, and update BELOW.
 
 const SELECTORS = {
-  // A row in the For Review table. Update to match QBO's actual class.
-  forReviewRow: '[data-testid^="txn-row"], [class*="ForReviewTableRow"], tr[class*="review-row"]',
-  // Within a row:
-  vendor: '[data-testid="txn-payee"], [class*="payee-column"], [class*="vendor"]',
-  amount: '[data-testid="txn-amount"], [class*="amount-column"], [class*="amount"]',
-  date: '[data-testid="txn-date"], [class*="date-column"], [class*="date"]',
-  description: '[data-testid="txn-description"], [class*="description"], [class*="memo"]',
-  categoryCell: '[data-testid="txn-category"], [class*="category-column"], [class*="category"]',
+  // Data rows only (exclude the header row).
+  forReviewRow: 'tr.idsTable__row:not(.idsTable__headerRow)',
+  // Column cells (matched from header inspection).
+  vendor: 'td.payee',
+  spent: 'td.spent',
+  received: 'td.received',
+  date: 'td.txnDate',
+  description: 'td.description',
+  categoryCell: 'td.category',
 };
 
 const BADGE_CLASS = "qba-suggestion-badge";
@@ -30,8 +31,7 @@ function log(...args) {
 }
 
 function isForReviewPage() {
-  // Best-effort URL match. Update if QBO's URL patterns differ in your account.
-  return /banktxns|bank-transactions/i.test(location.pathname);
+  return /banking|banktxns|bank-transactions/i.test(location.pathname);
 }
 
 function extractRowData(rowEl) {
@@ -47,14 +47,18 @@ function extractRowData(rowEl) {
     return null;
   };
 
-  const amountText = readText(SELECTORS.amount);
-  let amount = 0;
-  if (amountText) {
-    // Handle "$-42.50", "$42.50", "42.50", "(42.50)" — strip $ , parens.
-    const cleaned = amountText.replace(/[$,]/g, "").replace(/[()]/g, "-");
+  const spentText = readText(SELECTORS.spent);
+  const receivedText = readText(SELECTORS.received);
+  const parseAmount = (t) => {
+    if (!t) return 0;
+    const cleaned = t.replace(/[$,]/g, "").replace(/[()]/g, "-");
     const parsed = parseFloat(cleaned);
-    if (!isNaN(parsed)) amount = parsed;
-  }
+    return isNaN(parsed) ? 0 : parsed;
+  };
+  const spent = parseAmount(spentText);
+  const received = parseAmount(receivedText);
+  // Expenses are negative amounts. Income is positive.
+  const amount = spent > 0 ? -spent : received;
 
   return {
     dom_id: domId,

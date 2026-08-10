@@ -15,7 +15,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://qbo.intuit.com/*", "https://*.intuit.com/app/banktxns*"],
+      "matches": ["https://qbo.intuit.com/*", "https://*.intuit.com/*"],
       "js": ["src/content.js"],
       "css": ["src/style.css"],
       "run_at": "document_idle"
@@ -23,17 +23,7 @@
   ],
   "action": {
     "default_popup": "src/popup.html",
-    "default_title": "QB Auditor",
-    "default_icon": {
-      "16": "icons/icon-16.png",
-      "48": "icons/icon-48.png",
-      "128": "icons/icon-128.png"
-    }
+    "default_title": "QB Auditor"
   },
-  "options_page": "src/options.html",
-  "icons": {
-    "16": "icons/icon-16.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png"
-  }
+  "options_page": "src/options.html"
 }

@@ -129,6 +129,24 @@ def _resolve_ext_token(x_extension_token: Optional[str] = Header(None)) -> int:
     return row["firm_id"]
 
 
+class ExtClient(BaseModel):
+    id: int
+    firm_name: str
+
+
+@router.get("/clients", response_model=list[ExtClient])
+def list_clients_for_extension(firm_id: int = Depends(_resolve_ext_token)):
+    """List clients for the firm identified by the extension token.
+    Lets the extension render a dropdown so the user doesn't have to memorize IDs.
+    """
+    with db.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, firm_name FROM clients WHERE firm_id = ? ORDER BY id",
+            (firm_id,),
+        ).fetchall()
+    return [ExtClient(id=r["id"], firm_name=r["firm_name"]) for r in rows]
+
+
 @router.post("/categorize", response_model=CategorizeResponse)
 def categorize(
     payload: CategorizeRequest,
