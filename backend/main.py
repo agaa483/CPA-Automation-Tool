@@ -23,6 +23,7 @@ from backend.routes import (
     excel,
     oauth_qbo,
     oauth_outlook,
+    extension,
 )
 
 app = FastAPI(
@@ -54,6 +55,7 @@ app.include_router(audits.router)
 app.include_router(excel.router)
 app.include_router(oauth_qbo.router)
 app.include_router(oauth_outlook.router)
+app.include_router(extension.router)
 
 
 @app.get("/health")

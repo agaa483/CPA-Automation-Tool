@@ -1,0 +1,58 @@
+/* Injected badges next to QBO transaction rows. Scoped to a unique class
+   name to avoid conflicting with QBO's own styles. */
+
+.qba-suggestion-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin: 4px 0;
+  border-radius: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.3;
+  border: 1px solid;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qba-suggestion-badge .qba-label {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.qba-suggestion-badge b {
+  color: #111827;
+  font-weight: 600;
+}
+
+.qba-suggestion-badge small {
+  color: #9ca3af;
+  font-weight: 400;
+}
+
+.qba-suggestion-badge.qba-high {
+  background: #d1fae5;
+  border-color: #6ee7b7;
+}
+.qba-suggestion-badge.qba-medium {
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+.qba-suggestion-badge.qba-low {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+.qba-suggestion-badge.qba-unknown {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+  font-style: italic;
+}
+.qba-suggestion-badge.qba-error {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}

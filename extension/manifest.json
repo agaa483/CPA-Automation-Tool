@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "QB Auditor Assistant",
+  "version": "0.1.0",
+  "description": "AI-suggested categories for QuickBooks Online transactions.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://qbo.intuit.com/*",
+    "https://*.intuit.com/*",
+    "https://qb-auditor-backend.fly.dev/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://qbo.intuit.com/*", "https://*.intuit.com/app/banktxns*"],
+      "js": ["src/content.js"],
+      "css": ["src/style.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "QB Auditor",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "options_page": "src/options.html",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

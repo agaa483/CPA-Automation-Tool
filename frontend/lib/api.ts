@@ -81,6 +81,9 @@ export function makeApi(getToken: TokenGetter) {
     auditHistory: (clientId: number, limit = 50) =>
       req<AuditLogEntry[]>(`/clients/${clientId}/audits/history?limit=${limit}`),
 
+    generateExtensionToken: () =>
+      req<{ token: string; note: string }>("/extension/token", { method: "POST" }),
+
     uploadExcel: async (clientId: number, file: File, auditExisting: boolean) => {
       const form = new FormData();
       form.append("file", file);
