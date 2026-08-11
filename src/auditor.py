@@ -200,34 +200,38 @@ When you cite emails as evidence, include their IDs in supporting_email_ids.
 Always call submit_audit_decision exactly once."""
 
 
-def _build_suggest_prompt(
-    transaction: dict, emails: list[dict], categories: list[dict]
-) -> str:
-    if categories:
-        chart_lines = [
-            f"- {c['name']}" + (f": {c['description']}" if c.get("description") else "")
-            for c in categories
-        ]
-        chart_block = "\n".join(chart_lines)
-    else:
-        chart_block = "(no categories loaded for this client)"
+def _format_chart_block(categories: list[dict]) -> str:
+    """Stable chart-of-accounts block. Cacheable per client."""
+    if not categories:
+        return "Chart of accounts:\n(no categories loaded for this client)"
+    lines = [
+        f"- {c['name']}" + (f": {c['description']}" if c.get("description") else "")
+        for c in categories
+    ]
+    return (
+        "Chart of accounts (valid corrected_category values):\n"
+        + "\n".join(lines)
+    )
 
-    if emails:
-        email_blocks = []
-        for e in emails:
-            email_blocks.append(
-                f"Email ID: {e.get('id')}\n"
-                f"  From:    {e.get('sender')}\n"
-                f"  Date:    {e.get('received_at')}\n"
-                f"  Subject: {e.get('subject')}\n"
-                f"  Preview: {e.get('body_preview')}"
-            )
-        email_block = "\n\n".join(email_blocks)
-    else:
-        email_block = "(no candidate emails in the date window)"
 
+def _format_emails_block(emails: list[dict]) -> str:
+    if not emails:
+        return "(no candidate emails in the date window)"
+    blocks = []
+    for e in emails:
+        blocks.append(
+            f"Email ID: {e.get('id')}\n"
+            f"  From:    {e.get('sender')}\n"
+            f"  Date:    {e.get('received_at')}\n"
+            f"  Subject: {e.get('subject')}\n"
+            f"  Preview: {e.get('body_preview')}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _build_suggest_variable_block(transaction: dict, emails: list[dict]) -> str:
+    """Per-txn variable content. NOT cacheable."""
     direction = "OUTFLOW (expense)" if transaction.get("direction") == "out" else "INFLOW (income)"
-
     return (
         "Uncategorized bank transaction:\n"
         f"  Date:             {transaction.get('txn_date')}\n"
@@ -236,14 +240,18 @@ def _build_suggest_prompt(
         f"  Bank description: {transaction.get('vendor_raw') or '(none)'}\n"
         f"  From/To:          {transaction.get('counterparty') or '(none)'}\n"
         "\n"
-        "Chart of accounts (valid corrected_category values):\n"
-        f"{chart_block}\n"
-        "\n"
         "Candidate emails from the configured receipt mailbox:\n"
-        f"{email_block}\n"
+        f"{_format_emails_block(emails)}\n"
         "\n"
         "Pick the best category. Call submit_audit_decision."
     )
+
+
+def _build_suggest_prompt(
+    transaction: dict, emails: list[dict], categories: list[dict]
+) -> str:
+    """Kept for logging / backwards-compat. Returns the full text (chart + variable)."""
+    return _format_chart_block(categories) + "\n\n" + _build_suggest_variable_block(transaction, emails)
 
 
 def suggest_category(client_id: int, transaction: dict) -> AuditDecision:
@@ -271,18 +279,40 @@ def suggest_category(client_id: int, transaction: dict) -> AuditDecision:
 
     categories = _load_categories(client_id)
     valid_category_names = {c["name"] for c in categories}
-    user_prompt = _build_suggest_prompt(transaction, emails, categories)
+    chart_block = _format_chart_block(categories)
+    variable_block = _build_suggest_variable_block(transaction, emails)
+    user_prompt = chart_block + "\n\n" + variable_block  # for logging
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    messages = [{"role": "user", "content": user_prompt}]
-
+    # Prompt caching: system prompt + chart of accounts are stable per client,
+    # so mark them as cacheable. Per-txn variable content is the last block
+    # (uncached). Cached tokens cost ~10% of full price on subsequent calls
+    # within the 5-min cache TTL — huge savings on batch runs.
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SUGGEST_SYSTEM_PROMPT,
+        system=[
+            {
+                "type": "text",
+                "text": SUGGEST_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         tools=[AUDIT_TOOL],
         tool_choice={"type": "tool", "name": "submit_audit_decision"},
-        messages=messages,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": chart_block,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"type": "text", "text": variable_block},
+                ],
+            }
+        ],
     )
     submit = next(
         (b for b in response.content
@@ -304,7 +334,32 @@ def suggest_category(client_id: int, transaction: dict) -> AuditDecision:
     return _attach_raw(decision, conversation_log, user_prompt)
 
 
+def _build_audit_variable_block(transaction: dict, emails: list[dict]) -> str:
+    """Per-txn variable content for audit prompts. NOT cacheable."""
+    return (
+        "Transaction to audit:\n"
+        f"  QBO ID:           {transaction.get('qbo_txn_id')}\n"
+        f"  Type:             {transaction.get('txn_type')}\n"
+        f"  Date:             {transaction.get('txn_date')}\n"
+        f"  Amount:           {transaction.get('amount')}\n"
+        f"  Vendor / payee:   {transaction.get('vendor_raw')}\n"
+        f"  Existing QBO category: {transaction.get('current_qbo_category')}\n"
+        "\n"
+        "Candidate emails (may include unrelated messages — judge relevance):\n"
+        f"{_format_emails_block(emails)}\n"
+        "\n"
+        "Decide whether the existing QBO category is correct. Call submit_audit_decision."
+    )
+
+
 def _build_user_prompt(
+    transaction: dict, emails: list[dict], categories: list[dict]
+) -> str:
+    """Kept for backwards-compat / logging. Returns the full text."""
+    return _format_chart_block(categories) + "\n\n" + _build_audit_variable_block(transaction, emails)
+
+
+def _build_user_prompt_legacy(
     transaction: dict, emails: list[dict], categories: list[dict]
 ) -> str:
     if categories:
@@ -385,9 +440,15 @@ def _call_claude(client, messages: list[dict]):
     return client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         tools=[SEARCH_TOOL, AUDIT_TOOL],
-        tool_choice={"type": "any"},  # force at least one tool call per turn
+        tool_choice={"type": "any"},
         messages=messages,
     )
 
@@ -434,16 +495,38 @@ def _audit_with_sender(client_id: int, transaction: dict) -> AuditDecision:
 
     categories = _load_categories(client_id)
     valid_category_names = {c["name"] for c in categories}
-    user_prompt = _build_user_prompt(transaction, emails, categories)
+    chart_block = _format_chart_block(categories)
+    variable_block = _build_audit_variable_block(transaction, emails)
+    user_prompt = chart_block + "\n\n" + variable_block  # kept for logging
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    messages = [{"role": "user", "content": user_prompt}]
 
-    # Single call, decision tool only, forced.
+    # Cached system + cached chart-of-accounts; per-txn content uncached.
+    cached_system = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": chart_block,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": variable_block},
+            ],
+        }
+    ]
+
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=cached_system,
         tools=[AUDIT_TOOL],
         tool_choice={"type": "tool", "name": "submit_audit_decision"},
         messages=messages,
@@ -485,7 +568,7 @@ def _audit_with_sender(client_id: int, transaction: dict) -> AuditDecision:
     retry = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=cached_system,
         tools=[AUDIT_TOOL],
         tool_choice={"type": "tool", "name": "submit_audit_decision"},
         messages=messages,
@@ -524,10 +607,24 @@ def _audit_with_tool_loop(client_id: int, transaction: dict) -> AuditDecision:
     categories = _load_categories(client_id)
     valid_category_names = {c["name"] for c in categories}
 
-    user_prompt = _build_user_prompt(transaction, starter_emails, categories)
+    chart_block = _format_chart_block(categories)
+    variable_block = _build_audit_variable_block(transaction, starter_emails)
+    user_prompt = chart_block + "\n\n" + variable_block  # kept for logging
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    messages: list[dict] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": chart_block,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": variable_block},
+            ],
+        }
+    ]
 
     # Full conversation log we'll persist to audit_log.model_response.
     conversation_log: list[dict] = []
